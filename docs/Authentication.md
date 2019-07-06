@@ -31,49 +31,70 @@ let provider = MoyaProvider<YourAPI>(plugins: [CredentialsPlugin { target -> URL
 ])
 ```
 
-## Bearer HTTP Auth
+## Access Token Auth
+Another common method of authentication is by using an access token.
+Moya provides an `AccessTokenPlugin` that supports both `Bearer` authentication
+using a [JWT](https://jwt.io/introduction/) and `Basic` authentication for API keys.
+Also there is support for custom authorization types.
 
-Another common method of authentication is by using an access token. Commonly
-this is a [JWT](https://jwt.io/introduction/), but it can take other forms as
-well. These requests are authorized by adding an HTTP header of the following
-form:
+There are two steps required to start using an `AccessTokenPlugin`.
+
+1. You need to add an `AccessTokenPlugin` to your `MoyaProvider` like this:
+```Swift
+let token = "eyeAm.AJsoN.weBTOKen"
+let authPlugin = AccessTokenPlugin { token }
+let provider = MoyaProvider<YourAPI>(plugins: [authPlugin])
+```
+The `AccessTokenPlugin` initializer accepts a `tokenClosure` that is responsible
+for returning the token to be applied to the header of the request.
+
+2. Your `TargetType` needs to conform to the `AccessTokenAuthorizable` protocol:
+
+```Swift
+extension YourAPI: TargetType, AccessTokenAuthorizable {
+    case targetThatNeedsBearerAuth
+    case targetThatNeedsBasicAuth
+    case targetThatNeedsCustomAuth
+    case targetDoesNotNeedAuth
+
+    var authorizationType: AuthorizationType {
+        switch self {
+            case .targetThatNeedsBearerAuth:
+                return .bearer
+            case .targetThatNeedsBasicAuth:
+                return .basic
+            case .targetThatNeedsCustomAuth:
+                return .custom("CustomAuthorizationType")
+            case .targetDoesNotNeedAuth:
+                return .none
+            }
+        }
+}
+```
+
+The `AccessTokenAuthorizable` protocol requires you to implement a single
+property, `authorizationType`, which is an enum representing the header to 
+use for the request.
+
+**Bearer HTTP Auth**
+Bearer requests are authorized by adding a HTTP header of the following form:
 
 ```
 Authorization: Bearer <token>
 ```
 
-To make adding these authorization headers easier, Moya comes with an
-`AccessTokenPlugin`. It can be added to your provider like this:
+**Basic API Key Auth**
+Basic requests are authorized by adding a HTTP header of the following form:
 
-```swift
-let token = "eyeAm.AJsoN.weBTOKen"
-let authPlugin = AccessTokenPlugin(token: token)
-let provider = MoyaProvider<YourAPI>(plugins: [authPlugin])
+```
+Authorization: Basic <token>
 ```
 
-By default, `AccessTokenPlugin` will add the authorization header to all
-requests. If you want to control this behavior for a `TargetType`, you can
-conform to `AccessTokenAuthorizable` and use `shouldAuthorize` to
-specify the behavior:
+**Custom API Key Auth**
+Custom requests are authorized by adding a HTTP header of the following form:
 
-```swift
-enum YourAPI: TargetType, AccessTokenAuthorizable {
-    case targetThatNeedsAuthorization
-    case targetThatDoesntNeedAuthorization
-
-    /*
-    TargetType implementation
-    */
-
-    var shouldAuthorize: Bool {
-        switch self {
-        case .targetThatNeedsAuthorization:
-            return true
-        case .targetThatDoesntNeedAuthorization:
-            return false
-        }
-    }
-}
+```
+Authorization: <Custom> <token>
 ```
 
 ## OAuth
@@ -89,16 +110,17 @@ itself sometimes require network requests be performed _first_, so signing
 a request for Moya is an asynchronous process. Let's see an example.
 
 ```swift
-let requestClosure = { (endpoint: Endpoint<YourAPI>, done: URLRequest -> Void) in
-    let request = endpoint.urlRequest // This is the request Moya generates
+let requestClosure = { (endpoint: Endpoint, done: URLRequest -> Void) in
+    let request = try! endpoint.urlRequest() // This is the request Moya generates
+
     YourAwesomeOAuthProvider.signRequest(request, completion: { signedRequest in
         // The OAuth provider can make its own network calls to sign your request.
         // However, you *must* call `done()` with the signed so that Moya can
         // actually send it!
-        done(signedRequest)
+        done(.success(signedRequest))
     })
 }
-let provider = MoyaProvider(requestClosure: requestClosure)
+let provider = MoyaProvider<YourAPI>(requestClosure: requestClosure)
 ```
 
 (Note that Swift is able to infer the `YourAPI` generic – neat!)

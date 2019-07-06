@@ -1,10 +1,12 @@
+// swiftlint:disable file_length type_body_length
+
 import Quick
 import Nimble
 import Foundation
 import OHHTTPStubs
 @testable import Moya
 
-class MoyaProviderSpec: QuickSpec {
+final class MoyaProviderSpec: QuickSpec {
     override func spec() {
         var provider: MoyaProvider<GitHub>!
         beforeEach {
@@ -57,8 +59,10 @@ class MoyaProviderSpec: QuickSpec {
 
             let endpoint1 = provider.endpoint(target)
             let endpoint2 = provider.endpoint(target)
-            expect(endpoint1.urlRequest).toNot(beNil())
-            expect(endpoint1.urlRequest).to(equal(endpoint2.urlRequest))
+            let urlRequest1 = try? endpoint1.urlRequest()
+            let urlRequest2 = try? endpoint2.urlRequest()
+            expect(urlRequest1).toNot(beNil())
+            expect(urlRequest1).to(equal(urlRequest2))
         }
 
         it("returns a cancellable object when a request is made") {
@@ -110,9 +114,12 @@ class MoyaProviderSpec: QuickSpec {
 
         it("notifies at the beginning of network requests") {
             var called = false
-            let plugin = NetworkActivityPlugin { (change) -> Void in
+            var calledTarget: GitHub?
+
+            let plugin = NetworkActivityPlugin { change, target in
                 if change == .began {
                     called = true
+                    calledTarget = target as? GitHub
                 }
             }
 
@@ -121,13 +128,17 @@ class MoyaProviderSpec: QuickSpec {
             provider.request(target) { _ in  }
 
             expect(called) == true
+            expect(calledTarget) == target
         }
 
         it("notifies at the end of network requests") {
             var called = false
-            let plugin = NetworkActivityPlugin { (change) -> Void in
+            var calledTarget: GitHub?
+
+            let plugin = NetworkActivityPlugin { change, target in
                 if change == .ended {
                     called = true
+                    calledTarget = target as? GitHub
                 }
             }
 
@@ -136,11 +147,7 @@ class MoyaProviderSpec: QuickSpec {
             provider.request(target) { _ in  }
 
             expect(called) == true
-        }
-
-        it("uses the target's parameter encoding") {
-            let endpoint = MoyaProvider.defaultEndpointMapping(for: GitHub.zen)
-            expect(endpoint.parameterEncoding is JSONEncoding) == true
+            expect(calledTarget) == target
         }
 
         describe("a provider with delayed stubs") {
@@ -260,10 +267,13 @@ class MoyaProviderSpec: QuickSpec {
             beforeEach {
                 let endpointResolution: MoyaProvider<GitHub>.RequestClosure = { endpoint, done in
                     delay(requestTime) {
-                        if let urlRequest = endpoint.urlRequest {
+                        do {
+                            let urlRequest = try endpoint.urlRequest()
                             done(.success(urlRequest))
-                        } else {
-                            done(.failure(MoyaError.requestMapping(endpoint.url)))
+                        } catch MoyaError.requestMapping(let url) {
+                            done(.failure(MoyaError.requestMapping(url)))
+                        } catch {
+                            done(.failure(MoyaError.parameterEncoding(error)))
                         }
                     }
                 }
@@ -360,10 +370,13 @@ class MoyaProviderSpec: QuickSpec {
                 executed = false
                 let endpointResolution: MoyaProvider<GitHub>.RequestClosure = { endpoint, done in
                     executed = true
-                    if let urlRequest = endpoint.urlRequest {
+                    do {
+                        let urlRequest = try endpoint.urlRequest()
                         done(.success(urlRequest))
-                    } else {
-                        done(.failure(MoyaError.requestMapping(endpoint.url)))
+                    } catch MoyaError.requestMapping(let url) {
+                        done(.failure(MoyaError.requestMapping(url)))
+                    } catch {
+                        done(.failure(MoyaError.parameterEncoding(error)))
                     }
                 }
                 provider = MoyaProvider<GitHub>(requestClosure: endpointResolution, stubClosure: MoyaProvider.immediatelyStub)
@@ -381,7 +394,7 @@ class MoyaProviderSpec: QuickSpec {
             it("returns sample data") {
                 let endpointResolution: MoyaProvider<GitHub>.EndpointClosure = { target in
                     let url = target.baseURL.appendingPathComponent(target.path).absoluteString
-                    return Endpoint(url: url, sampleResponseClosure: {.networkResponse(200, target.sampleData)}, method: target.method, parameters: target.parameters)
+                    return Endpoint(url: url, sampleResponseClosure: {.networkResponse(200, target.sampleData)}, method: target.method, task: target.task, httpHeaderFields: target.headers)
                 }
                 let provider = MoyaProvider<GitHub>(endpointClosure: endpointResolution, stubClosure: MoyaProvider.immediatelyStub)
 
@@ -396,10 +409,9 @@ class MoyaProviderSpec: QuickSpec {
             }
 
             it("returns identical sample response") {
-                let response = HTTPURLResponse(url: URL(string: "http://example.com")!, mimeType: nil, expectedContentLength: 0, textEncodingName: nil)
+                let response = HTTPURLResponse(url: URL(string: "http://example.com")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
                 let endpointResolution: MoyaProvider<GitHub>.EndpointClosure = { target in
-                    let url = target.baseURL.appendingPathComponent(target.path).absoluteString
-                    return Endpoint(url: url, sampleResponseClosure: { .response(response, Data()) }, method: target.method, parameters: target.parameters)
+                    return Endpoint(url: URL(target: target).absoluteString, sampleResponseClosure: { .response(response, target.sampleData) }, method: target.method, task: target.task, httpHeaderFields: target.headers)
                 }
                 let provider = MoyaProvider<GitHub>(endpointClosure: endpointResolution, stubClosure: MoyaProvider.immediatelyStub)
 
@@ -417,7 +429,7 @@ class MoyaProviderSpec: QuickSpec {
                 let error = NSError(domain: "Internal iOS Error", code: -1234, userInfo: nil)
                 let endpointResolution: MoyaProvider<GitHub>.EndpointClosure = { target in
                     let url = target.baseURL.appendingPathComponent(target.path).absoluteString
-                    return Endpoint(url: url, sampleResponseClosure: { .networkError(error) }, method: target.method, parameters: target.parameters)
+                    return Endpoint(url: url, sampleResponseClosure: { .networkError(error) }, method: target.method, task: target.task, httpHeaderFields: target.headers)
                 }
                 let provider = MoyaProvider<GitHub>(endpointClosure: endpointResolution, stubClosure: MoyaProvider.immediatelyStub)
 
@@ -462,6 +474,7 @@ class MoyaProviderSpec: QuickSpec {
 
         describe("a provider with stubbed errors") {
             var provider: MoyaProvider<GitHub>!
+
             beforeEach {
                 provider = MoyaProvider(endpointClosure: failureEndpointClosure, stubClosure: MoyaProvider.immediatelyStub)
             }
@@ -524,9 +537,7 @@ class MoyaProviderSpec: QuickSpec {
                 let baseURL = URL(string: "http://example.com")!
                 let path = "/endpoint"
                 let method = Moya.Method.get
-                let parameters: [String: Any]? = ["key": "value"]
-                let parameterEncoding: ParameterEncoding = URLEncoding.default
-                let task = Task.request
+                let task = Task.requestParameters(parameters: ["key": "value"], encoding: URLEncoding.default)
                 let sampleData = "sample data".data(using: .utf8)!
                 let headers: [String: String]? = ["headerKey": "headerValue"]
             }
@@ -535,10 +546,13 @@ class MoyaProviderSpec: QuickSpec {
                 var requestedURL: String?
                 let endpointResolution: MoyaProvider<MultiTarget>.RequestClosure = { endpoint, done in
                     requestedURL = endpoint.url
-                    if let urlRequest = endpoint.urlRequest {
+                    do {
+                        let urlRequest = try endpoint.urlRequest()
                         done(.success(urlRequest))
-                    } else {
-                        done(.failure(MoyaError.requestMapping(endpoint.url)))
+                    } catch MoyaError.requestMapping(let url) {
+                        done(.failure(MoyaError.requestMapping(url)))
+                    } catch {
+                        done(.failure(MoyaError.parameterEncoding(error)))
                     }
                 }
                 let provider = MoyaProvider<MultiTarget>(requestClosure: endpointResolution, stubClosure: MoyaProvider.immediatelyStub)
@@ -552,35 +566,17 @@ class MoyaProviderSpec: QuickSpec {
                 expect(requestedURL) == "http://example.com/endpoint"
             }
 
-            it("uses correct parameters") {
-                var requestParameters: [String: Any]?
-                let endpointResolution: MoyaProvider<MultiTarget>.RequestClosure = { endpoint, done in
-                    requestParameters = endpoint.parameters
-                    if let urlRequest = endpoint.urlRequest {
-                        done(.success(urlRequest))
-                    } else {
-                        done(.failure(MoyaError.requestMapping(endpoint.url)))
-                    }
-                }
-                let provider = MoyaProvider<MultiTarget>(requestClosure: endpointResolution, stubClosure: MoyaProvider.immediatelyStub)
-
-                waitUntil { done in
-                    provider.request(MultiTarget(StructAPI())) { _ in
-                        done()
-                    }
-                }
-
-                expect(requestParameters?.count) == 1
-            }
-
             it("uses correct method") {
                 var requestMethod: Moya.Method?
                 let endpointResolution: MoyaProvider<MultiTarget>.RequestClosure = { endpoint, done in
                     requestMethod = endpoint.method
-                    if let urlRequest = endpoint.urlRequest {
+                    do {
+                        let urlRequest = try endpoint.urlRequest()
                         done(.success(urlRequest))
-                    } else {
-                        done(.failure(MoyaError.requestMapping(endpoint.url)))
+                    } catch MoyaError.requestMapping(let url) {
+                        done(.failure(MoyaError.requestMapping(url)))
+                    } catch {
+                        done(.failure(MoyaError.parameterEncoding(error)))
                     }
                 }
                 let provider = MoyaProvider<MultiTarget>(requestClosure: endpointResolution, stubClosure: MoyaProvider.immediatelyStub)
@@ -607,17 +603,20 @@ class MoyaProviderSpec: QuickSpec {
                     }
                 }
 
-                expect(dataString) == "sample data"
+                expect(dataString).to(equal("sample data"))
             }
 
             it("uses correct headers") {
-                var headers: [String : String]?
+                var headers: [String: String]?
                 let endpointResolution: MoyaProvider<MultiTarget>.RequestClosure = { endpoint, done in
                     headers = endpoint.httpHeaderFields
-                    if let urlRequest = endpoint.urlRequest {
+                    do {
+                        let urlRequest = try endpoint.urlRequest()
                         done(.success(urlRequest))
-                    } else {
-                        done(.failure(MoyaError.requestMapping(endpoint.url)))
+                    } catch MoyaError.requestMapping(let url) {
+                        done(.failure(MoyaError.requestMapping(url)))
+                    } catch {
+                        done(.failure(MoyaError.parameterEncoding(error)))
                     }
                 }
                 let provider = MoyaProvider<MultiTarget>(requestClosure: endpointResolution, stubClosure: MoyaProvider.immediatelyStub)
@@ -637,9 +636,7 @@ class MoyaProviderSpec: QuickSpec {
                 let baseURL = URL(string: "http://example.com/123/somepath?X-ABC-Asd=123")!
                 let path = ""
                 let method = Moya.Method.get
-                let parameters: [String: Any]? = ["key": "value"]
-                let parameterEncoding: ParameterEncoding = URLEncoding.default
-                let task = Task.request
+                let task = Task.requestParameters(parameters: ["key": "value"], encoding: URLEncoding.default)
                 let sampleData = "sample data".data(using: .utf8)!
                 let headers: [String: String]? = nil
             }
@@ -655,10 +652,11 @@ class MoyaProviderSpec: QuickSpec {
 
         describe("an inflight-tracking provider") {
             var provider: MoyaProvider<GitHub>!
+
             beforeEach {
-                OHHTTPStubs.stubRequests(passingTest: {$0.url!.path == "/zen"}) { _ in
+                OHHTTPStubs.stubRequests(passingTest: {$0.url!.path == "/zen"}, withStubResponse: { _ in
                     return OHHTTPStubsResponse(data: GitHub.zen.sampleData, statusCode: 200, headers: nil)
-                }
+                })
                 provider = MoyaProvider<GitHub>(trackInflights: true)
             }
 
@@ -690,6 +688,7 @@ class MoyaProviderSpec: QuickSpec {
 
         describe("the cancellable token") {
             var provider: MoyaProvider<GitHub>!
+
             beforeEach {
                 provider = MoyaProvider<GitHub>(stubClosure: MoyaProvider.delayedStub(0.5))
             }
@@ -721,30 +720,31 @@ class MoyaProviderSpec: QuickSpec {
 
         describe("a provider with progress tracking") {
             var provider: MoyaProvider<GitHubUserContent>!
-            beforeEach {
 
+            beforeEach {
                 //delete downloaded filed before each test
                 let directoryURLs = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
                 let file = directoryURLs.first!.appendingPathComponent("logo_github.png")
                 try? FileManager.default.removeItem(at: file)
 
                 //`responseTime(-4)` equals to 1000 bytes at a time. The sample data is 4000 bytes.
-                OHHTTPStubs.stubRequests(passingTest: {$0.url!.path.hasSuffix("logo_github.png")}) { _ in
+                OHHTTPStubs.stubRequests(passingTest: {$0.url!.path.hasSuffix("logo_github.png")}, withStubResponse: { _ in
                     return OHHTTPStubsResponse(data: GitHubUserContent.downloadMoyaWebContent("logo_github.png").sampleData, statusCode: 200, headers: nil).responseTime(-4)
-                }
+                })
                 provider = MoyaProvider<GitHubUserContent>()
             }
 
-            it("tracks progress of request") {
-
+            it("tracks progress of download request") {
                 let target: GitHubUserContent = .downloadMoyaWebContent("logo_github.png")
 
+                var progressObjects: [Progress?] = []
                 var progressValues: [Double] = []
                 var completedValues: [Bool] = []
                 var error: MoyaError?
 
                 waitUntil(timeout: 5.0) { done in
                     let progressClosure: ProgressBlock = { progress in
+                        progressObjects.append(progress.progressObject)
                         progressValues.append(progress.progress)
                         completedValues.append(progress.completed)
                     }
@@ -762,6 +762,194 @@ class MoyaProviderSpec: QuickSpec {
                 expect(error).to(beNil())
                 expect(progressValues) == [0.25, 0.5, 0.75, 1.0, 1.0]
                 expect(completedValues) == [false, false, false, false, true]
+                expect(progressObjects.filter { $0 != nil }.count) == 5
+            }
+
+            it("tracks progress of a request") {
+
+                let target: GitHubUserContent = .requestMoyaWebContent("logo_github.png")
+
+                var progressObjects: [Progress?] = []
+                var progressValues: [Double] = []
+                var completedValues: [Bool] = []
+                var error: MoyaError?
+
+                waitUntil(timeout: 5.0) { done in
+                    let progressClosure: ProgressBlock = { progress in
+                        progressObjects.append(progress.progressObject)
+                        progressValues.append(progress.progress)
+                        completedValues.append(progress.completed)
+                    }
+
+                    let progressCompletionClosure: Completion = { (result) in
+                        if case .failure(let err) = result {
+                            error = err
+                        }
+                        done()
+                    }
+
+                    provider.request(target, callbackQueue: nil, progress: progressClosure, completion: progressCompletionClosure)
+                }
+
+                expect(error).to(beNil())
+                expect(progressValues) == [0.25, 0.5, 0.75, 1.0, 1.0]
+                expect(completedValues) == [false, false, false, false, true]
+                expect(progressObjects.filter { $0 != nil }.count) == 5
+            }
+        }
+
+        describe("a provider with progress tracking and invalid content-length header") {
+            var provider: MoyaProvider<GitHubUserContent>!
+
+            beforeEach {
+                //delete downloaded filed before each test
+                let directoryURLs = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+                let file = directoryURLs.first!.appendingPathComponent("logo_github.png")
+                try? FileManager.default.removeItem(at: file)
+
+                //`responseTime(-4)` equals to 1000 bytes at a time. The sample data is 4000 bytes.
+                OHHTTPStubs.stubRequests(passingTest: {$0.url!.path.hasSuffix("logo_github.png")}, withStubResponse: { _ in
+                    return OHHTTPStubsResponse(data: GitHubUserContent.downloadMoyaWebContent("logo_github.png").sampleData, statusCode: 200, headers: ["Content-Length": ""]).responseTime(-4)
+                })
+                provider = MoyaProvider<GitHubUserContent>()
+            }
+
+            it("tracks progress of download request") {
+                let target: GitHubUserContent = .downloadMoyaWebContent("logo_github.png")
+
+                var progressObjects: [Progress?] = []
+                var progressValues: [Double] = []
+                var completedValues: [Bool] = []
+                var error: MoyaError?
+
+                waitUntil(timeout: 5.0) { done in
+                    let progressClosure: ProgressBlock = { progress in
+                        progressObjects.append(progress.progressObject)
+                        progressValues.append(progress.progress)
+                        completedValues.append(progress.completed)
+                    }
+
+                    let progressCompletionClosure: Completion = { (result) in
+                        if case .failure(let err) = result {
+                            error = err
+                        }
+                        done()
+                    }
+
+                    provider.request(target, callbackQueue: nil, progress: progressClosure, completion: progressCompletionClosure)
+                }
+
+                expect(error).to(beNil())
+                expect(progressValues) == [0, 0, 0, 0, 1.0]
+                expect(completedValues) == [false, false, false, false, true]
+                expect(progressObjects.filter { $0 != nil }.count) == 5
+            }
+
+            it("tracks progress of a request") {
+                let target: GitHubUserContent = .requestMoyaWebContent("logo_github.png")
+
+                var progressObjects: [Progress?] = []
+                var progressValues: [Double] = []
+                var completedValues: [Bool] = []
+                var error: MoyaError?
+
+                waitUntil(timeout: 5.0) { done in
+                    let progressClosure: ProgressBlock = { progress in
+                        progressObjects.append(progress.progressObject)
+                        progressValues.append(progress.progress)
+                        completedValues.append(progress.completed)
+                    }
+
+                    let progressCompletionClosure: Completion = { (result) in
+                        if case .failure(let err) = result {
+                            error = err
+                        }
+                        done()
+                    }
+
+                    provider.request(target, callbackQueue: nil, progress: progressClosure, completion: progressCompletionClosure)
+                }
+
+                expect(error).to(beNil())
+                expect(progressValues) == [0, 0, 0, 0, 1.0]
+                expect(completedValues) == [false, false, false, false, true]
+                expect(progressObjects.filter { $0 != nil }.count) == 5
+            }
+        }
+
+        describe("a provider with upload progress tracking") {
+            var provider: MoyaProvider<HTTPBin>!
+            beforeEach {
+                provider = MoyaProvider<HTTPBin>()
+            }
+
+            it("tracks progress of request") {
+                let url = Bundle(for: MoyaProviderSpec.self).url(forResource: "testImage", withExtension: "png")!
+                let target: HTTPBin = .upload(file: url)
+
+                var progressObjects: [Progress?] = []
+                var progressValues: [Double] = []
+                var completedValues: [Bool] = []
+                var error: MoyaError?
+
+                waitUntil(timeout: 5.0) { done in
+                    let progressClosure: ProgressBlock = { progress in
+                        progressObjects.append(progress.progressObject)
+                        progressValues.append(progress.progress)
+                        completedValues.append(progress.completed)
+                    }
+
+                    let progressCompletionClosure: Completion = { (result) in
+                        if case .failure(let err) = result {
+                            error = err
+                        }
+                        done()
+                    }
+
+                    provider.request(target, callbackQueue: nil, progress: progressClosure, completion: progressCompletionClosure)
+                }
+
+                expect(error).to(beNil())
+                expect(progressValues.count) > 3
+                expect(completedValues.count) > 3
+                expect(completedValues.filter { !$0 }.count) == completedValues.count - 1 // only false except one
+                expect(completedValues.last) == true // the last must be true
+                expect(progressObjects.filter { $0 != nil }.count) == progressObjects.count // no nil object
+            }
+
+            it("tracks progress of multipart request") {
+
+                let formData = HTTPBin.createTestMultipartFormData()
+                let target = HTTPBin.uploadMultipart(formData, nil)
+
+                var progressObjects: [Progress?] = []
+                var progressValues: [Double] = []
+                var completedValues: [Bool] = []
+                var error: MoyaError?
+
+                waitUntil(timeout: 5.0) { done in
+                    let progressClosure: ProgressBlock = { progress in
+                        progressObjects.append(progress.progressObject)
+                        progressValues.append(progress.progress)
+                        completedValues.append(progress.completed)
+                    }
+
+                    let progressCompletionClosure: Completion = { (result) in
+                        if case .failure(let err) = result {
+                            error = err
+                        }
+                        done()
+                    }
+
+                    provider.request(target, callbackQueue: nil, progress: progressClosure, completion: progressCompletionClosure)
+                }
+
+                expect(error).to(beNil())
+                expect(progressValues.count) > 3
+                expect(completedValues.count) > 3
+                expect(completedValues.filter { !$0 }.count) == completedValues.count - 1 // only false except one
+                expect(completedValues.last) == true // the last must be true
+                expect(progressObjects.filter { $0 != nil }.count) == progressObjects.count // no nil object
             }
         }
 
@@ -769,9 +957,9 @@ class MoyaProviderSpec: QuickSpec {
             var stubDescriptor: OHHTTPStubsDescriptor!
 
             beforeEach {
-                stubDescriptor = OHHTTPStubs.stubRequests(passingTest: {$0.url!.path == "/zen"}) { _ in
+                stubDescriptor = OHHTTPStubs.stubRequests(passingTest: {$0.url!.path == "/zen"}, withStubResponse: { _ in
                     return OHHTTPStubsResponse(data: GitHub.zen.sampleData, statusCode: 200, headers: nil)
-                }
+                })
             }
 
             afterEach {
@@ -855,6 +1043,80 @@ class MoyaProviderSpec: QuickSpec {
 
                         expect(callbackQueueLabel) == DispatchQueue.main.label
                     }
+                }
+            }
+        }
+
+        // Resolves #1592 where validation is not performed on a stubbed request
+        describe("a provider for stubbed requests with validation") {
+            var stubbedProvider: MoyaProvider<GitHub>!
+
+            context("response contains invalid status code") {
+                it("returns an error") {
+                    let endpointClosure = { (target: GitHub) -> Endpoint in
+                        return Endpoint(
+                            url: URL(target: target).absoluteString,
+                            sampleResponseClosure: { .networkResponse(400, target.sampleData) },
+                            method: target.method,
+                            task: target.task,
+                            httpHeaderFields: target.headers
+                        )
+                    }
+
+                    stubbedProvider = MoyaProvider<GitHub>(endpointClosure: endpointClosure, stubClosure: MoyaProvider.immediatelyStub)
+
+                    var receivedError: Error?
+                    var receivedResponse: Response?
+
+                    waitUntil { done in
+                        stubbedProvider.request(.zen) { result in
+                            switch result {
+                            case .success(let response):
+                                receivedResponse = response
+                            case .failure(let error):
+                                receivedError = error
+                            }
+                            done()
+                        }
+                    }
+
+                    expect(receivedResponse).to(beNil())
+                    expect(receivedError).toNot(beNil())
+                }
+            }
+
+            context("response contains valid status code") {
+                it("returns a response") {
+                    let endpointClosure = { (target: GitHub) -> Endpoint in
+                        return Endpoint(
+                            url: URL(target: target).absoluteString,
+                            sampleResponseClosure: { .networkResponse(200, target.sampleData) },
+                            method: target.method,
+                            task: target.task,
+                            httpHeaderFields: target.headers
+                        )
+                    }
+
+                    stubbedProvider = MoyaProvider<GitHub>(endpointClosure: endpointClosure, stubClosure: MoyaProvider.immediatelyStub)
+
+                    var receivedError: Error?
+                    var receivedResponse: Response?
+
+                    waitUntil { done in
+                        stubbedProvider.request(.zen) { result in
+                            switch result {
+                            case .success(let response):
+                                receivedResponse = response
+                            case .failure(let error):
+                                receivedError = error
+                            }
+                            done()
+                        }
+                    }
+
+                    expect(receivedResponse).toNot(beNil())
+                    expect(receivedError).to(beNil())
+                    expect(GitHub.zen.validationType.statusCodes).to(contain(receivedResponse!.statusCode))
                 }
             }
         }
